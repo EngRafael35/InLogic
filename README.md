@@ -6695,3 +6695,2243 @@ if __name__ == "__main__":
             window.show()
             sys.exit(app.exec_())
 # -----------------------------------------------------
+
+
+
+ A seguir codigo que roda como serviço do windons 100% 
+
+ import os
+import sys
+import time
+import logging
+import traceback
+import pythoncom
+from queue import Queue, Empty
+from logging.handlers import RotatingFileHandler
+from threading import Thread, Lock
+import threading
+from pyModbusTCP.client import ModbusClient  # Substituído por pyModbusTCP
+from multiprocessing import Process, Manager , freeze_support, Event, RawArray, Value, Queue
+from pycomm3 import LogixDriver
+import paho.mqtt.client as mqtt_client
+import paho.mqtt.client as mqtt
+import win32file
+import openpyxl
+import pyodbc
+import json
+import servicemanager
+import uuid
+from datetime import datetime
+import win32api
+win32api.SetConsoleCtrlHandler(lambda x: True, True)
+
+# Api do google envio de notificação
+from google.oauth2 import service_account
+import google.auth.transport.requests
+import requests
+import tempfile
+
+
+import hashlib
+import sys
+import os
+import win32event
+import win32api
+import winerror
+import psutil
+import ctypes
+
+# Imports do service
+import win32serviceutil
+import win32service
+import win32event
+import servicemanager
+import time
+import sys
+import traceback
+
+
+# Import da validação de licença
+import threading
+import time
+import os
+import json
+import wmi
+import pythoncom
+from datetime import datetime, timedelta
+from base64 import b64decode, b64encode
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
+from Crypto.Random import get_random_bytes
+
+from collections import deque  # Adicione no topo do arquivo
+log_buffer = deque(maxlen=100)  # Buffer circular de logs
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+pipe_handle = None  # 🔗 Variável global para o Named Pipe
+
+# === Configuração Avançada do Logger ===
+LOG_DIR = r"C:\In Logic\Logs Inlogic"
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOG_DIR, "log_service.log")
+MAX_LOG_SIZE = 200 * 1024 * 1024  # 200MB
+BACKUP_COUNT = 5  # Quantidade máxima de arquivos antigos mantidos
+MAX_LOG_QUEUE_SIZE = 1000  # Limite da fila para evitar consumo excessivo de RAM
+
+# Fila global para logs
+log_queue = Queue()
+
+# Lista global para manter os CLPs ativos
+clps_ativos = []
+
+
+# Configuração global do logger
+logger = logging.getLogger("LogService")
+logger.setLevel(logging.DEBUG)
+handler = RotatingFileHandler(LOG_FILE, maxBytes=MAX_LOG_SIZE, backupCount=BACKUP_COUNT, encoding="utf-8")
+formatter = logging.Formatter(
+    '%(asctime)s |  %(levelname)-8s |  %(message)s',
+    datefmt='%d-%m-%Y %H:%M:%S'
+)
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+
+
+status_conexao = False
+running = True
+servico_global = None
+
+
+# Caminho e chave
+CONFIG_PATH = r"C:\In Logic\Setup ativos"
+BASE_IMAGES = r"C:\In Logic\Imagens"
+CONFIG_PATH1 = os.path.join(CONFIG_PATH, "Setup.cfg")
+CHAVE_SECRETA = b"inlogic18366058".ljust(32, b'0')  # Garante 32 bytes
+LICENSE_FILE = os.path.join(CONFIG_PATH, "Authentication.cfg")  # Arquivo de licença
+
+# Arquivo json de configuração de autenticação google
+service_account_info = {
+Variavel ocultada
+}
+
+# Variável global para controle do status da licença
+licenca_ativa = threading.Event()
+
+# Função desabilitada devido codigo estar rodando como um serviço nativo windons
+def evitar_execucao_duplicada(nome_base=None):
+    """
+    Evita execução duplicada do script ou .exe.
+    - Usa mutex nomeado via Windows API
+    - Valida também via psutil se outro processo com mesmo path já está rodando
+    """
+
+    # 📌 Descobre o caminho do executável ou script atual
+    if nome_base is None:
+        caminho_executavel = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(__file__)
+    else:
+        caminho_executavel = nome_base
+
+    caminho_normalizado = os.path.realpath(caminho_executavel).lower()
+
+    # 🔒 Mutex exclusivo baseado no hash do caminho
+    hash_nome = hashlib.sha256(caminho_normalizado.encode()).hexdigest()
+    nome_mutex = f"inlogic_mutex_{hash_nome}"
+    mutex = win32event.CreateMutex(None, False, nome_mutex)
+
+    if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
+        #ctypes.windll.user32.MessageBoxW(0, "O sistema já está em execução (mutex detectado).", "In Logic", 0x10)
+        sys.exit(1)
+
+    # 🧠 Validação extra via psutil
+    meu_pid = os.getpid()
+    for proc in psutil.process_iter(['pid', 'exe', 'cmdline']):
+        try:
+            if proc.info['pid'] == meu_pid:
+                continue
+
+            exe_proc = proc.info['exe'] or ""
+            cmdline_proc = ' '.join(proc.info['cmdline']) if proc.info['cmdline'] else ""
+            exe_proc_normalizado = os.path.realpath(exe_proc).lower() if exe_proc else ""
+
+            if caminho_normalizado == exe_proc_normalizado:
+                mensagem = (
+                    f"⚠ Já existe uma instância do sistema em execução!\n\n"
+                    f"🔁 PID Atual: {meu_pid}\n"
+                    f"🆔 PID Duplicado: {proc.info['pid']}\n"
+                    f"📄 Executável: {exe_proc}\n"
+                    f"📜 Cmdline: {cmdline_proc}\n"
+                    f"📁 Comparado com: {caminho_executavel}"
+                )
+
+                print("\n🔍 Instância duplicada detectada!")
+                print(mensagem)
+
+                ctypes.windll.user32.MessageBoxW(0, mensagem, "In Logic - Instância Duplicada", 0x10)
+                sys.exit(1)
+
+        except (psutil.NoSuchProcess, psutil.AccessDenied, FileNotFoundError):
+            continue
+
+    return mutex
+
+# === Classes Principais ===
+
+class ConexaoSQLPersistente:
+    def __init__(self, db_config):
+        self.db_config = db_config
+        self.conn = None
+        self.cursor = None
+        self.lock = threading.Lock()  # 🔒 Protege acesso simultâneo
+        self.erro_colunas = False
+        self.erro_fechar = False
+        self.erro_execultar = False
+        self.erro_execultar1 = False
+        self.erro_conectar = False
+
+        self.reconectar()
+
+    def reconectar(self):
+        """Tenta (re)estabelecer a conexão com o SQL Server"""
+        try:
+            self.fechar()  # Fecha conexão anterior, se houver
+
+            conn_str = (
+                f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+                f"SERVER={self.db_config['server']};"
+                f"DATABASE={self.db_config['database']};"
+                f"UID={self.db_config['username']};"
+                f"PWD={self.db_config['password']};"
+            )
+            self.conn = pyodbc.connect(conn_str, timeout=5)
+            self.cursor = self.conn.cursor()
+            log_queue.put(f"SISTEMA  |  {self.db_config['database']}  |   Conexão SQL estabelecida com sucesso...")
+            self.erro_conectar = False
+
+        except Exception as ex:
+            if not self.erro_conectar:
+                log_queue.put(f"SISTEMA  |  {self.db_config['database']}  |   [ERRO] Falha ao conectar ao SQL Server: {ex}")
+                self.erro_conectar = True
+            self.conn = None
+            self.cursor = None
+
+    def executar(self, sql, valores=None):
+        """
+        Executa comandos SQL com reconexão automática em caso de falha.
+        """
+        with self.lock:
+            try:
+                if not self.conn or not self.cursor:
+                    self.reconectar()
+
+                self.cursor.execute(sql, valores or [])
+                self.conn.commit()
+                self.erro_execultar = False
+                self.erro_execultar1 = False
+            except pyodbc.OperationalError as op_err:
+                if not self.erro_execultar:
+                    log_queue.put(f"SISTEMA  |  {self.db_config['database']}  |   [ERRO] Operacional (desconectado?): {op_err}")
+                    self.erro_execultar = True
+                self.reconectar()
+                raise op_err
+
+            except Exception as ex:
+                if not self.erro_execultar1:
+                    log_queue.put(f"SISTEMA  |  {self.db_config['database']}  |   [ERRO] Falha ao executar comando SQL: {ex}")
+                    self.erro_execultar1 = True
+                raise ex
+
+    def obter_colunas(self, tabela_sql):
+        """
+        Retorna os nomes das colunas da tabela SQL fornecida.
+        """
+        with self.lock:
+            try:
+                if not self.conn or not self.cursor:
+                    self.reconectar()
+
+                self.cursor.execute(f"SELECT * FROM {tabela_sql} WHERE 1=0")
+                self.erro_colunas = False
+                return [col[0] for col in self.cursor.description]
+
+            except Exception as ex:
+                if not self.erro_colunas:
+                    log_queue.put(f"SISTEMA  |  {self.db_config['database']}  |   [ERRO] Falha ao obter colunas da tabela '{tabela_sql}': {ex}")
+                    self.erro_colunas = True
+                return []
+
+    def fechar(self):
+        """Fecha conexão e cursor"""
+        try:
+            if self.cursor:
+                self.cursor.close()
+                self.cursor = None
+            if self.conn:
+                self.conn.close()
+                self.conn = None
+
+            self.erro_fechar = False
+
+        except Exception as ex:
+            if not self.erro_fechar:
+                log_queue.put(f"SISTEMA  |  {self.db_config['database']}  |   [ERRO] Falha ao fechar conexão: {ex}")
+                self.erro_fechar = True
+
+
+# ===============================
+# Processo filho: leitura Modbus
+# ===============================
+class CLPModbusProcesso(Process):
+    """
+    Processo concorrente responsável por:
+      - Ler todas as memórias do CLP (registradores Modbus)
+      - Ler o bit/coil do gatilho
+      - Atualizar a memória compartilhada (RawArray e Value)
+      - Atualizar status e tempo de ciclo
+    """
+    def __init__(
+        self,
+        plc_ip,
+        mem_list,
+        gatilho_addr,
+        shared_mem_raw,
+        gatilho_valor_raw,
+        loop_time_raw,
+        status_raw,
+        stop_flag,
+        log_queue
+    ):
+       
+        super().__init__()
+        self.daemon = True  # Processo filho morre junto com o pai
+        self.plc_ip = plc_ip
+        self.mem_list = mem_list
+        self.gatilho_addr = gatilho_addr  # endereço do coil do gatilho
+        self.shared_mem_raw = shared_mem_raw  # RawArray para registradores
+        self.gatilho_valor_raw = gatilho_valor_raw  # Value(bool) para gatilho
+        self.loop_time_raw = loop_time_raw  # Value(double) para tempo de ciclo
+        self.status_raw = status_raw  # Value(char*) para status do processo
+        self.stop_flag = stop_flag
+        self.log_queue = log_queue  # Fila global de logs do codigo pai principal
+        self.connected = None # Flag de status de conexão do CLP
+        self.client = None # FLag para armazenar o cliente de conexão modbus 
+
+    def run(self):
+        import time
+        from pyModbusTCP.client import ModbusClient
+
+        self.client = None                   # Cliente ModbusTCP
+        self.connected = False               # Flag para status de conexão
+        self.previous_trigger_state = False  # Estado anterior do gatilho (para detectar borda)
+        last_logged_status = None            # Controle para logar conexão/desconexão apenas em transição
+
+        # Loga início do processo
+        self.log_queue.put(f"[{self.plc_ip}] [PROCESSO] Processo iniciado ✅")
+
+        while not self.stop_flag.value:
+            try:
+                # 1. Tenta conectar se necessário (apenas se não está conectado)
+                if not self.connected or self.client is None:
+                    self.client = ModbusClient(
+                        host=self.plc_ip, auto_open=True, auto_close=True, timeout=2
+                    )
+                    self.connected = self.client.open()  # Tenta abrir conexão TCP
+
+                    if self.connected:
+                        self.status_raw.value = b'connected'
+                        # Loga conexão apenas se status mudou
+                        if last_logged_status != "connected":
+                            self.log_queue.put(f"[{self.plc_ip}] [PROCESSO] ✅ CLP conectado com sucesso.")
+                            last_logged_status = "connected"
+                        # Inicializa o estado anterior do gatilho
+                        gatilho_valor = self.client.read_coils(self.gatilho_addr, 1)
+                        self.previous_trigger_state = gatilho_valor[0] if gatilho_valor is not None else False
+                    else:
+                        self.status_raw.value = b'disconnected'
+                        # Loga desconexão apenas se status mudou
+                        if last_logged_status != "disconnected":
+                            self.log_queue.put(f"[{self.plc_ip}] [PROCESSO] ❌ Tentando reconectar em 2s...")
+                            last_logged_status = "disconnected"
+                        time.sleep(2)  # Aguarda antes de tentar reconectar
+                        continue       # Reinicia o loop (não tenta ler nada sem conexão)
+
+                # 2. Leitura cíclica dos dados do CLP
+                ciclo_inicio = time.perf_counter()  # Marca início do ciclo de leitura
+
+                # Lê o valor do gatilho (coil)
+                gatilho_valor = self.client.read_coils(self.gatilho_addr, 1)
+                if gatilho_valor is not None:
+                    current_trigger_state = gatilho_valor[0]
+                else:
+                    raise Exception("Falha ao ler o gatilho (coil)")
+
+                # Atualiza a memória compartilhada com valor do gatilho
+                self.gatilho_valor_raw.value = current_trigger_state
+
+                # Lê todos os registradores (holding registers) definidos em mem_list
+                memories_data = {}
+                for reg in self.mem_list:
+                    valor_word = self.client.read_holding_registers(reg, 1)
+                    if valor_word is not None:
+                        memories_data[reg] = valor_word[0]
+                    else:
+                        raise Exception(f"Falha na leitura do registrador {reg}")
+
+                # Atualiza o RawArray compartilhado com os valores lidos
+                for idx, reg in enumerate(self.mem_list):
+                    self.shared_mem_raw[idx] = memories_data.get(reg, 0)
+
+                ciclo_fim = time.perf_counter()  # Marca fim do ciclo de leitura
+                ciclo_duracao = ciclo_fim - ciclo_inicio
+                self.loop_time_raw.value = ciclo_duracao  # Atualiza tempo de ciclo
+
+                # Loga borda de subida do gatilho (apenas para diagnóstico, não polui log)
+                if current_trigger_state and not self.previous_trigger_state:
+                    pass
+                # Atualiza estado anterior do gatilho para próxima iteração
+                self.previous_trigger_state = current_trigger_state
+
+                time.sleep(0.01)  # Pequeno delay para aliviar CPU
+
+            except Exception as e:
+                # Se ocorrer exceção, loga desconexão apenas se status mudou
+                self.status_raw.value = b'disconnected'
+                if last_logged_status != "disconnected":
+                    self.log_queue.put(f"[{self.plc_ip}] [PROCESSO] Erro de comunicação: {e} | Tentando reconectar...")
+                    last_logged_status = "disconnected"
+                self.connected = False
+                # Fecha o cliente Modbus, se necessário
+                if self.client:
+                    try:
+                        self.client.close()
+                    except Exception:
+                        pass
+                time.sleep(2)  # Aguarda antes de tentar reconectar
+
+        # Ao sair do loop (stop_flag ativado), fecha conexão e loga finalização
+        if self.client:
+            try:
+                self.client.close()
+            except Exception:
+                pass
+        self.log_queue.put(f"[{self.plc_ip}] [PROCESSO] Processo finalizado.")
+
+# Classe principal: inicializa estrutura e lógica CLP
+# ===================================================
+class CLPModbus:
+    """
+    Classe principal de integração com CLP Delta via Modbus TCP.
+    Organiza toda a comunicação, memória compartilhada e eventos.
+    """
+    def __init__(
+        self,
+        plc_ip,
+        notificacao_config=None,
+        mem_list=None,
+        gatilho=1000,
+        triger=None,
+        db_config=None,
+        calculos=None,
+        mqtt_config_acesso=None,
+        local_gravacao=None,
+        manager=None
+    ):
+        # --- Variáveis originais e opcionais ---
+        self.notificacao_config = notificacao_config or {}
+        self.plc_ip = plc_ip
+        self.mem_list = mem_list if mem_list is not None else []
+        self.gatilho = gatilho                      # Endereço do gatilho (coil Modbus)
+        self.triger = float(triger) if isinstance(triger, (int, float)) and triger else 0   # Trigger automático (tempo, em segundos)
+        self.db_config = db_config
+        self.calculos = calculos if calculos is not None else {}
+        self.configuracao_mqtt = mqtt_config_acesso
+        self.local_gravacao = local_gravacao if local_gravacao is not None else {}
+        self.manager = manager
+        self.mem_size = len(self.mem_list)
+
+        # --- Memória compartilhada robusta para dados e controle ---
+        # Array para registradores int16
+        self.shared_mem_raw = RawArray('h', self.mem_size)
+        # Valor booleano do gatilho (coil)
+        self.gatilho_valor_raw = Value(ctypes.c_bool, False)
+        # Tempo de loop/ciclo (monitoramento)
+        self.loop_time_raw = Value(ctypes.c_double, 0.0)
+        # Status do processo (monitoramento)
+        self.status_raw = Value(ctypes.c_char_p, b'disconnected')
+
+
+        # Flag para parar processo
+        self.stop_flag = Value('b', False)  # 'b' = boolean
+
+        # Fila para eventos de gravação/etc.
+        self.fila = Queue()
+        self.fila_excel = Queue()    # Fila para falhas de Excel
+        self.fila_sql = Queue()      # Fila para falhas de SQL
+        self.fila_mqtt = Queue()     # Fila para falhas de MQTT
+
+        # Estado anterior do gatilho (para detectar a borda de subida)
+        self.gatilho_valor_anterior = False
+        # Para trigger automático de gravação
+        self._last_trigger_time = time.perf_counter()
+
+        # --- Variáveis globais e SQL (mantém compatibilidade) ---
+        global licenca_ativa
+        self.licenca_ativa = licenca_ativa
+
+        # Banco de dados: inicialização (mantém compatibilidade)
+        self.sql_conexao = None
+
+        # Verifica se db_config foi passado e se é um dicionário
+        if isinstance(self.db_config, dict):
+            # Define as chaves obrigatórias para conexão SQL
+            required_keys = {'server', 'database', 'username', 'password'}
+            
+            # Lista de valores considerados genéricos (placeholders não preenchidos)
+            invalid_values = {
+                "GENÉRICO_MODIFICAVEL",
+                "GENÉRICO_V001_MODIFICAVEL",
+                "SEU_NOME_MODIFICAVEL",
+                "SUA_SENHA"
+            }
+            
+            # Verifica se todas as chaves obrigatórias estão presentes no dicionário
+            if required_keys.issubset(self.db_config):
+                # Verifica se ALGUM dos campos obrigatórios está com valor padrão/genérico
+                if any(not str(self.db_config[k]).strip() or str(self.db_config[k]).strip() in invalid_values for k in required_keys):
+                    # Se existir valor genérico, loga que a configuração não está válida e ignora a conexão
+                    log_queue.put(f"{self.plc_ip}  |  [INFO] Dados de acesso SQL incompletos. SQL desabilitado.")
+                else:
+                    try:
+                        # Tenta criar a conexão persistente com o banco de dados usando os dados fornecidos
+                        self.sql_conexao = ConexaoSQLPersistente(self.db_config)
+                    except Exception as e:
+                        # Em caso de erro na conexão, loga o erro para diagnóstico
+                        log_queue.put(f"{self.plc_ip}  |  [ERRO SQL] {e}")
+            else:
+                # Se faltar qualquer chave obrigatória, loga que os dados estão incompletos e desabilita SQL
+                log_queue.put(f"{self.plc_ip}  |  [INFO] Dados de acesso SQL incompletos. SQL desabilitado.")
+
+
+
+        # --- Instacia Processo filho para leitura do CLP ---
+        try:
+            self.process = CLPModbusProcesso(
+                plc_ip=self.plc_ip,
+                mem_list=self.mem_list,
+                gatilho_addr=self.gatilho,
+                shared_mem_raw=self.shared_mem_raw,
+                gatilho_valor_raw=self.gatilho_valor_raw,
+                loop_time_raw=self.loop_time_raw,
+                status_raw=self.status_raw,
+                stop_flag=self.stop_flag,
+                log_queue=log_queue    # <-- aqui você passa a fila global
+            )
+            self.process.start()
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            log_queue.put(f"{self.plc_ip}  |  ❌ Falha ao iniciar processo: {e}\n{tb}")
+
+
+        self.running = True  # <-- Adicione esta linha
+
+        # Tempos para análise de desempenho (nomes antigos)
+        self.inicio_tempo = 0
+        self.fim_tempo = 0
+        self.tempo_total = 0
+
+    def ler_memorias(self):
+        proximo_disparo_timer = time.perf_counter() + self.triger if self.triger and self.triger > 0 else None
+
+        while self.running:
+            # --- Borda de subida do gatilho físico ---
+            valor_atual = self.gatilho_valor_raw.value
+            if valor_atual and not self.gatilho_valor_anterior:
+                self.tempo_total = self.loop_time_raw.value
+                self._registrar_evento(motivo="gatilho")
+            self.gatilho_valor_anterior = valor_atual
+
+            # --- Temporizador: gravação automática ---
+            if self.triger and isinstance(self.triger, (int, float)) and self.triger > 0:
+                agora = time.perf_counter()
+                if agora >= proximo_disparo_timer:
+                    self.tempo_total = self.loop_time_raw.value
+                    self._registrar_evento(motivo="tempo")
+                    # Garante que o próximo disparo será exatamente múltiplo do trigger, sem drift
+                    proximo_disparo_timer += self.triger
+                    # Se houve atraso e o tempo já passou de vários triggers, corrige:
+                    if agora > proximo_disparo_timer:
+                        # Ajusta para o próximo múltiplo
+                        proximo_disparo_timer = agora + self.triger
+
+            time.sleep(0.01)  # Alivia CPU
+
+    def conectar (self):
+        while self.running:
+            break
+
+    def _registrar_evento(self, motivo="manual"):
+        """
+        Monta o dicionário de dados e coloca na fila para gravação/SQL/MQTT/etc.
+        """
+        dados = {reg: self.shared_mem_raw[i] for i, reg in enumerate(self.mem_list)}
+        item = {
+            "clp_ip": self.plc_ip,
+            "gatilho": self.gatilho,
+            "dados_memorias": dados,
+        }
+        if licenca_ativa.is_set():
+            self.fila.put(item)
+        else:
+            log_queue.put(f"{self.plc_ip}  |  Gravação interrompida: licença inativa.")
+
+    def obter_dados(self):
+        """
+        Retorna snapshot atual das memórias compartilhadas.
+        """
+        return {reg: self.shared_mem_raw[i] for i, reg in enumerate(self.mem_list)}
+
+    def obter_status(self):
+        """
+        Retorna status atual do processo filho/Modbus.
+        """
+        return self.status_raw.value.decode('utf-8')
+
+    def parar(self):
+        """
+        Para o processo filho e limpa recursos.
+        """
+        try:
+            self.stop_flag.value = True
+            if hasattr(self, 'process') and self.process.is_alive():
+                self.process.join(timeout=10)
+                if self.process.is_alive():
+                    self.process.terminate()
+                    self.process.join(timeout=2)
+            log_queue.put(f"{self.plc_ip}  | CLPModbus parado com sucesso.")
+            self.running = False  # Finaliza Thread principal CLP
+        except Exception as e:
+            log_queue.put(f"{self.plc_ip}  |  ❌ Erro na finalização do CLP: {e}")
+
+
+
+# Processo filho: leitura cíclica do ControlLogix
+class CLPControlLogixProcesso(Process):
+    """
+    Processo concorrente responsável por:
+      - Ler todas as tags do CLP ControlLogix
+      - Ler o bit/tag do gatilho
+      - Atualizar a memória compartilhada (RawArray e Value)
+      - Atualizar status e tempo de ciclo
+    """
+    def __init__(
+        self,
+        plc_ip,
+        mem_list,
+        gatilho_tag,
+        shared_mem_raw,
+        gatilho_valor_raw,
+        loop_time_raw,
+        status_raw,
+        stop_flag,
+        log_queue
+    ):
+        super().__init__()
+        self.daemon = True  # Processo filho morre junto com o pai
+        self.plc_ip = plc_ip
+        self.mem_list = mem_list
+        self.gatilho_tag = gatilho_tag
+        self.shared_mem_raw = shared_mem_raw
+        self.gatilho_valor_raw = gatilho_valor_raw
+        self.loop_time_raw = loop_time_raw
+        self.status_raw = status_raw
+        self.stop_flag = stop_flag
+        self.log_queue = log_queue
+
+
+    def run(self):
+        from pycomm3 import LogixDriver
+        self.client = None
+        self.connected = False
+        last_logged_status = None
+
+        self.log_queue.put(f"[{self.plc_ip}] [PROCESSO] Processo iniciado ✅")
+
+        while not self.stop_flag.value:
+            try:
+                if not self.connected or self.client is None:
+                    self.client = LogixDriver(self.plc_ip)
+                    self.client.open()
+                    self.connected = True
+                    self.status_raw.value = b'connected'
+                    if last_logged_status != "connected":
+                        self.log_queue.put(f"[{self.plc_ip}] [PROCESSO] ✅ ControlLogix conectado.")
+                        last_logged_status = "connected"
+                    gatilho_valor = self.client.read(self.gatilho_tag)
+                    self.previous_trigger_state = gatilho_valor.value if gatilho_valor is not None and hasattr(gatilho_valor, 'value') else False
+
+                ciclo_inicio = time.perf_counter()
+
+                # Lê o valor do gatilho (tag)
+                gatilho_valor = self.client.read(self.gatilho_tag)
+                if gatilho_valor is not None:
+                    current_trigger_state = gatilho_valor.value if hasattr(gatilho_valor, 'value') else gatilho_valor
+                else:
+                    raise Exception("Falha ao ler o gatilho (tag)")
+                self.gatilho_valor_raw.value = bool(current_trigger_state)
+
+                # Lê todas as tags definidas em mem_list
+                for idx, tag in enumerate(self.mem_list):
+                    valor_lido = self.client.read(tag)
+                    valor = valor_lido.value if hasattr(valor_lido, 'value') else valor_lido
+
+                    # -- Tratamento igual ao antigo:
+                    v = 0
+                    if valor is None:
+                        v = 0
+                    elif isinstance(valor, (int, float)):
+                        v = valor
+                    elif isinstance(valor, bool):
+                        v = int(valor)
+                    elif isinstance(valor, str):
+                        try:
+                            # tenta converter string para float
+                            if "." in valor or "e" in valor.lower():
+                                v = float(valor)
+                            else:
+                                v = int(valor)
+                        except Exception:
+                            v = 0
+                    else:
+                        v = 0
+
+                    self.shared_mem_raw[idx] = v
+
+                ciclo_fim = time.perf_counter()
+                self.loop_time_raw.value = ciclo_fim - ciclo_inicio
+                self.status_raw.value = b'connected'
+                time.sleep(0.01)
+            except Exception as e:
+                self.status_raw.value = b'disconnected'
+                if last_logged_status != "disconnected":
+                    self.log_queue.put(f"[{self.plc_ip}] [PROCESSO] Erro: {e} | Tentando reconectar...")
+                    last_logged_status = "disconnected"
+                self.connected = False
+                if self.client:
+                    try:
+                        self.client.close()
+                    except Exception:
+                        pass
+                time.sleep(2)
+
+        if self.client:
+            try:
+                self.client.close()
+            except Exception:
+                pass
+        self.log_queue.put(f"[{self.plc_ip}] [PROCESSO] Processo finalizado.")
+
+
+
+class CLPControlLogix:
+    """
+    Classe principal de integração com CLP Allen Bradley ControlLogix via Ethernet/IP.
+    Estrutura e lógica compatíveis com CLPModbus: filas, SQL seguro, logs, triggers, temporizador, shutdown seguro.
+    """
+    def __init__(
+        self,
+        plc_ip,
+        notificacao_config=None,
+        mem_list=None,
+        gatilho=None,
+        triger=None,
+        db_config=None,
+        calculos=None,
+        mqtt_config_acesso=None,
+        local_gravacao=None,
+        manager=None
+    ):
+        # --- Variáveis de configuração ---
+        self.notificacao_config = notificacao_config or {}
+        self.plc_ip = plc_ip
+        self.mem_list = mem_list if mem_list is not None else []
+        self.gatilho = gatilho
+        self.triger = float(triger) if isinstance(triger, (int, float)) and triger else 0
+        self.db_config = db_config
+        self.calculos = calculos if calculos is not None else {}
+        self.configuracao_mqtt = mqtt_config_acesso
+        self.local_gravacao = local_gravacao if local_gravacao is not None else {}
+        self.manager = manager
+        self.mem_size = len(self.mem_list)
+
+        # --- Memória compartilhada para dados e controle ---
+        self.shared_mem_raw = RawArray('d', self.mem_size)  # Memória para os valores das tags
+        self.gatilho_valor_raw = Value(ctypes.c_bool, False)  # Valor do gatilho
+        self.loop_time_raw = Value(ctypes.c_double, 0.0)     # Tempo de ciclo
+        self.status_raw = Value(ctypes.c_char_p, b'disconnected')  # Status do processo
+        self.stop_flag = Value('b', False)  # Flag de parada
+
+        # --- Filas para eventos, erros e logs ---
+        self.fila = Queue()
+        self.fila_excel = Queue()
+        self.fila_sql = Queue()
+        self.fila_mqtt = Queue()
+
+        # --- Controle de trigger e temporizador ---
+        self.gatilho_valor_anterior = False
+        self._last_trigger_time = time.perf_counter()
+
+        # --- Variáveis globais e SQL seguro ---
+        global licenca_ativa
+        self.licenca_ativa = licenca_ativa
+        self.sql_conexao = None
+
+        # --- Checagem avançada do db_config ---
+        if isinstance(self.db_config, dict):
+            required_keys = {'server', 'database', 'username', 'password'}
+            invalid_values = {
+                "GENÉRICO_MODIFICAVEL",
+                "GENÉRICO_V001_MODIFICAVEL",
+                "SEU_NOME_MODIFICAVEL",
+                "SUA_SENHA"
+            }
+            if required_keys.issubset(self.db_config):
+                if any(not str(self.db_config[k]).strip() or str(self.db_config[k]).strip() in invalid_values for k in required_keys):
+                    log_queue.put(f"{self.plc_ip}  |  [INFO] Dados de acesso SQL incompletos. SQL desabilitado.")
+                else:
+                    try:
+                        self.sql_conexao = ConexaoSQLPersistente(self.db_config)
+                    except Exception as e:
+                        log_queue.put(f"{self.plc_ip}  |  [ERRO SQL] {e}")
+            else:
+                log_queue.put(f"{self.plc_ip}  |  [INFO] Dados de acesso SQL incompletos. SQL desabilitado.")
+
+        self.running = True
+        self.inicio_tempo = 0
+        self.fim_tempo = 0
+        self.tempo_total = 0
+
+        # --- Instancia Processo filho para leitura do CLP ---
+        try:
+            self.process = CLPControlLogixProcesso(
+                plc_ip=self.plc_ip,
+                mem_list=self.mem_list,
+                gatilho_tag=self.gatilho,
+                shared_mem_raw=self.shared_mem_raw,
+                gatilho_valor_raw=self.gatilho_valor_raw,
+                loop_time_raw=self.loop_time_raw,
+                status_raw=self.status_raw,
+                stop_flag=self.stop_flag,
+                log_queue=log_queue
+            )
+            self.process.start()
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            log_queue.put(f"{self.plc_ip}  |  ❌ Falha ao iniciar processo: {e}\n{tb}")
+
+
+    def conectar (self):
+        while self.running:
+            break
+
+    def ler_memorias(self):
+        """
+        Thread principal: monitora borda de gatilho e temporizador, dispara eventos padronizados (padrão Modbus).
+        """
+        proximo_disparo_timer = time.perf_counter() + self.triger if self.triger and self.triger > 0 else None
+
+        while self.running:
+            # --- Borda de subida do gatilho físico ---
+            valor_atual = self.gatilho_valor_raw.value
+            if valor_atual and not self.gatilho_valor_anterior:
+                self.tempo_total = self.loop_time_raw.value
+                self._registrar_evento(motivo="gatilho")
+            self.gatilho_valor_anterior = valor_atual
+
+            # --- Temporizador: gravação automática ---
+            if self.triger and isinstance(self.triger, (int, float)) and self.triger > 0:
+                agora = time.perf_counter()
+                if agora >= proximo_disparo_timer:
+                    self.tempo_total = self.loop_time_raw.value
+                    self._registrar_evento(motivo="tempo")
+                    proximo_disparo_timer += self.triger
+                    if agora > proximo_disparo_timer:
+                        proximo_disparo_timer = agora + self.triger
+
+            time.sleep(0.01)  # Alivia CPU
+
+    def _registrar_evento(self, motivo="manual"):
+        """
+        Monta o dicionário de dados e coloca na fila para gravação/SQL/MQTT/etc.
+        Padrão igual ao Modbus!
+        """
+        dados = {reg: self.shared_mem_raw[i] for i, reg in enumerate(self.mem_list)}
+        item = {
+            "clp_ip": self.plc_ip,
+            "gatilho": self.gatilho,
+            "dados_memorias": dados
+        }
+        if licenca_ativa.is_set():
+            self.fila.put(item)
+        else:
+            log_queue.put(f"{self.plc_ip}  |  Gravação interrompida: licença inativa.")
+
+    def obter_dados(self):
+        """
+        Retorna snapshot atual das memórias compartilhadas.
+        """
+        return {reg: self.shared_mem_raw[i] for i, reg in enumerate(self.mem_list)}
+
+    def obter_status(self):
+        """
+        Retorna status atual do processo filho/CLP.
+        """
+        return self.status_raw.value.decode('utf-8')
+
+    def parar(self):
+        """
+        Para o processo filho e limpa recursos.
+        """
+        try:
+            self.stop_flag.value = True
+            if hasattr(self, 'process') and self.process.is_alive():
+                self.process.join(timeout=10)
+                if self.process.is_alive():
+                    self.process.terminate()
+                    self.process.join(timeout=2)
+            log_queue.put(f"{self.plc_ip}  | CLP ControlLogix parado com sucesso.")
+            self.running = False
+        except Exception as e:
+            log_queue.put(f"{self.plc_ip}  |  ❌ Erro na finalização do CLP: {e}")
+
+
+
+    
+"""
+
+class CLPControlLogix:
+    def __init__(self, plc_ip, notificacao_config=None, mem_list=None, gatilho=None, triger=None, db_config=None, calculos=None, mqtt_config_acesso=None, local_gravacao=None):
+        
+        self.notificacao_config = notificacao_config or {}
+        self.plc_ip = plc_ip
+        self.mem_list = mem_list if mem_list else []
+        self.gatilho = gatilho
+        self.triger = float(triger) if isinstance(triger, (int, float)) and triger > 0 else 0
+        self.local_gravacao = local_gravacao if local_gravacao else {}
+        self.calculos = calculos if calculos else {}
+        self.configuracao_mqtt = mqtt_config_acesso if mqtt_config_acesso else {}
+
+        # Variavel de licença global
+        global licenca_ativa
+        self.licenca_ativa = licenca_ativa
+
+        # ✅ Verificação avançada do db_config
+        if isinstance(db_config, dict):
+            required_keys = {'server', 'database', 'username', 'password'}
+            if required_keys.issubset(db_config):
+                self.db_config = db_config
+                self.sql_conexao = ConexaoSQLPersistente(self.db_config)
+            else:
+                log_queue.put(f"{self.plc_ip}  |  [INFO] Dados de acesso SQL incompletos. SQL desabilitado.")
+                self.db_config = None
+                self.sql_conexao = None
+        else:
+            self.db_config = None
+            self.sql_conexao = None
+
+
+        # Filas individuais para este CLP
+        self.fila = Queue()  # Fila principal para leitura de dados
+        self.fila_excel = Queue()  # Fila de falhas para Excel
+        self.fila_sql = Queue()  # Fila de falhas para SQL
+        self.fila_mqtt = Queue()  # Fila de falhas para mqtt
+
+        # controle de print de logs evitar multiplos
+        self.falha_excel = False
+        self.falha_sql = False
+
+        self.lock = Lock()
+        self.connected = False
+        self.running = True
+        self.previous_trigger_state = False
+        self.client = None
+
+
+    def conectar(self):
+        try:
+            self.client = LogixDriver(self.plc_ip)
+            self.client.open()
+            self.connected = True
+            log_queue.put((f"{self.plc_ip}  |  CLP ControlLogix conectado...", "green"))
+        except Exception as e:
+            log_queue.put((f"{self.plc_ip}  |  Falha ao conectar ao CLP ControlLogix - {str(e)}", "red"))
+            self.connected = False
+
+    def ler_memorias(self):
+        initial_state_set = False  # Variável para indicar se o estado inicial foi definido
+
+        while self.running:
+            try:
+                # Conectar ao CLP, se ainda não estiver conectado
+                if not self.connected:
+                    self.client = LogixDriver(self.plc_ip)  # Inicializa o cliente
+                    self.client.open()  # Abre a sessão explicitamente
+                    self.connected = True
+                    log_queue.put((f"{self.plc_ip}  |  Conectado ao CLP ControlLogix no IP: {self.plc_ip}", "green"))
+                
+                # Verificar se a conexão está ativa (usando uma leitura de teste)
+                try:
+                    # Testa a conexão lendo uma tag simples (pode ser substituída por outra tag padrão)
+                    self.client.read(self.gatilho)
+                except Exception as e:
+                    log_queue.put((f"{self.plc_ip}  |  Falha ao verificar conexão com o CLP: {str(e)}", "red"))
+                    raise ValueError("{self.plc_ip}  |  A conexão com o CLP parece estar inativa.")
+                
+                # Monitorar a tag de gatilho
+                gatilho_valor = self.client.read(self.gatilho)
+                if gatilho_valor is not None:
+                    current_trigger_state = gatilho_valor.value if hasattr(gatilho_valor, 'value') else gatilho_valor
+                    
+                    # Define o estado inicial do gatilho, se ainda não foi definido
+                    if not initial_state_set:
+                        self.previous_trigger_state = current_trigger_state
+                        initial_state_set = True
+                        #log_queue.put(f"Estado inicial do gatilho {self.gatilho} configurado como {self.previous_trigger_state}")
+                    
+                    # Detectar borda de subida (gatilho ativado)
+                    if current_trigger_state and not self.previous_trigger_state:
+                        self.inicio_tempo = time.perf_counter() # Inicia o calculo de tempo gasto
+      
+                        # Leitura das memórias especificadas em `mem_list`
+                        with self.lock:
+                            dados_ciclo = {}  # Dicionário para armazenar os valores do ciclo de gravação
+                            for tag in self.mem_list:
+                                try:
+                                    valor = self.client.read(tag)  # Lê o valor da tag
+                                    valor = valor.value if hasattr(valor, 'value') else valor  # Extrai o valor real
+                                    dados_ciclo[tag] = valor  # Adiciona o valor lido ao dicionário
+                                except Exception as e:
+                                    log_queue.put((f"{self.plc_ip}  |  Erro ao ler tag {tag}: {str(e)}", "red"))
+                                    dados_ciclo[tag] = None  # Caso não consiga ler, adiciona None
+                            # Insere os valores do ciclo completo na fila como um único item (dicionário)
+                            item = {
+                                "clp_ip": self.plc_ip,
+                                "gatilho": self.gatilho,
+                                "dados_memorias": dados_ciclo
+                            }
+
+                            # Verifica se a licença esta ativa antes de iniciar a gravação
+                            if licenca_ativa.is_set():
+                                # Coloca o item na fila com as informações de IP, gatilho e dados das memórias
+                                self.fila.put(item)
+                            else:
+                                log_queue.put(f"{self.plc_ip}  |  Gravação interrompida licença inativa!")
+
+                            self.fim_tempo = time.perf_counter()
+                            self.tempo_total = self.fim_tempo - self.inicio_tempo
+                
+                    # Atualiza o estado anterior do gatilho
+                    self.previous_trigger_state = current_trigger_state
+
+                # Aqui: Verifica diretamente se está ligado
+                if gatilho_valor is not None:
+                    # ===> AQUI ELE VERIFICA SE TEM ALGUM TEMPORIZADOR CONFIGURADO
+                    if hasattr(self, "triger") and isinstance(self.triger, (int, float)) and self.triger > 0:
+                        if not hasattr(self, "_last_trigger_time"):
+                            self._last_trigger_time = time.perf_counter()  # Use time.perf_counter() para precisão de alta resolução
+
+                        # Verifica se o tempo decorrido atingiu o tempo do trigger
+                        if time.perf_counter() - self._last_trigger_time >= self.triger:  # Verifica o intervalo de tempo em segundos
+                            self.inicio_tempo = time.perf_counter() # Inicia o calculo de tempo gasto
+                            if status_conexao:
+                                log_queue.put(f"{self.plc_ip}  |  Iniciando gravação automatica CLP Contollogix IP:{self.plc_ip}")
+                    
+
+                            # Leitura das memórias especificadas em `mem_list`
+                            with self.lock:
+                                dados_ciclo = {}  # Dicionário para armazenar os valores do ciclo de gravação
+                                for tag in self.mem_list:
+                                    try:
+                                        valor = self.client.read(tag)  # Lê o valor da tag
+                                        valor = valor.value if hasattr(valor, 'value') else valor  # Extrai o valor real
+                                        dados_ciclo[tag] = valor  # Adiciona o valor lido ao dicionário
+                                    except Exception as e:
+                                        log_queue.put((f"{self.plc_ip}  |  Erro ao ler tag {tag}: {str(e)}", "red"))
+                                        dados_ciclo[tag] = None  # Caso não consiga ler, adiciona None
+                                # Insere os valores do ciclo completo na fila como um único item (dicionário)
+                                item = {
+                                    "clp_ip": self.plc_ip,
+                                    "gatilho": self.gatilho,
+                                    "dados_memorias": dados_ciclo
+                                }
+
+                                # Verifica se a licença esta ativa antes de iniciar a gravação
+                                if licenca_ativa.is_set():
+                                    # Coloca o item na fila com as informações de IP, gatilho e dados das memórias
+                                    self.fila.put(item)
+                                else:
+                                    log_queue.put(f"{self.plc_ip}  |  Gravação interrompida licença inativa!")
+
+                                self.fim_tempo = time.perf_counter()
+                                self.tempo_total = self.fim_tempo - self.inicio_tempo
+
+                        # Atualiza o tempo do último trigger
+                        self._last_trigger_time = time.perf_counter()
+
+
+            
+            except Exception as ex:
+                if status_conexao:
+                    log_queue.put((f"{self.plc_ip}  |  Erro de Conexão - CLP ControlLogix IP:{self.plc_ip} - {ex}", "red"))
+                self.connected = False  # Marca como desconectado
+
+
+
+    def parar(self):
+        self.running = False
+        log_queue.put(f"{self.plc_ip}  |  Parando CLP Controllogix...")
+        if self.client:
+            self.client.close()
+
+"""
+
+
+
+class CLPMQTT:
+    def __init__(self, broker_address, notificacao_config=None, mem_list=None, gatilho=None, triger=None, db_config=None, calculos=None, mqtt_config_acesso=None, local_gravacao=None):
+        """
+        Inicializa a classe com as configurações do broker MQTT e parâmetros de memória e gatilho.
+        """
+        self.notificacao_config = notificacao_config or {}
+        self.broker_address = broker_address  # Endereço do broker MQTT
+        self.plc_ip = broker_address  # Endereço do broker MQTT
+        self.mem_list = mem_list if mem_list is not None else []  # Lista de tópicos de memória
+        self.gatilho = gatilho  # Tópico do gatilho
+        self.calculos = calculos if calculos is not None else {}
+        self.local_gravacao = local_gravacao if local_gravacao is not None else {}
+        self.configuracao_mqtt = mqtt_config_acesso
+        self.triger = float(triger) if isinstance(triger, (int, float)) and triger > 0 else 0 
+
+        # Variavel de licença global
+        global licenca_ativa
+        self.licenca_ativa = licenca_ativa
+
+        # ✅ Verificação avançada do db_config
+        if isinstance(db_config, dict):
+            required_keys = {'server', 'database', 'username', 'password'}
+            if required_keys.issubset(db_config):
+                self.db_config = db_config
+                self.sql_conexao = ConexaoSQLPersistente(self.db_config)
+            else:
+                log_queue.put(f"{self.plc_ip}  |  [INFO] Dados de acesso SQL incompletos. SQL desabilitado.")
+                self.db_config = None
+                self.sql_conexao = None
+        else:
+            self.db_config = None
+            self.sql_conexao = None
+
+
+
+        # Estado inicial do gatilho
+        self.estado_gatilho_anterior = 1  # Estado anterior do gatilho (0 = desativado, 1 = ativado)
+        self.lock = Lock()  # Trava para evitar condições de corrida
+
+        # Filas para processamento de dados
+        self.fila = Queue()  # Fila principal para leitura de dados
+        self.fila_sql = Queue()  # Fila de falhas para SQL
+        self.fila_excel = Queue()  # Fila de falhas para Excel
+        self.fila_mqtt = Queue()  # Fila de falhas para mqtt
+
+        # controle de print de logs evitar multiplos
+        self.falha_excel = False
+        self.falha_sql = False
+
+        # Dicionário para armazenar os valores das memórias
+        self.memories = {}  # Armazena os valores atualizados dos tópicos de memória
+        self.running = True  # Controla o loop principal
+
+        # Cliente MQTT
+        self.client = mqtt.Client()
+        self.client.on_connect = self.on_connect
+        self.client.on_message = self.on_message
+        self.erro_conectar = False
+
+    def conectar(self):
+        """
+        Conecta ao broker MQTT e inicia o loop do cliente.
+        """
+        try:
+            self.client.connect(self.broker_address, 1883, 60)  # Conecta ao broker na porta 1883
+            self.client.loop_start()  # Inicia o loop para processar mensagens
+            log_queue.put((f"{self.broker_address}  |  Conectado ao broker MQTT", "green"))  # Log de sucesso
+            self.erro_conectar = False
+        except Exception as e:
+            if not self.erro_conectar:
+                log_queue.put((f"{self.broker_address}  |  Erro ao conectar ao broker MQTT: {e}", "red"))
+                self.erro_conectar = True
+
+    def on_connect(self, client, userdata, flags, rc):
+        """
+        Callback quando a conexão é estabelecida.
+        """
+        if rc == 0:
+            log_queue.put((f"{self.broker_address}  |  Conexão MQTT bem-sucedida.", "green"))
+            self.inscrever_topicos()  # Inscreve-se nos tópicos após a conexão
+        else:
+            log_queue.put((f"{self.broker_address}  |  Falha na conexão MQTT. Código: {rc}", "red"))
+
+    def inscrever_topicos(self):
+        """
+        Inscreve-se nos tópicos de memória e gatilho.
+        """
+        try:
+            # Inscreve-se no tópico do gatilho
+            if self.gatilho:
+                self.client.subscribe(self.gatilho)
+                log_queue.put((f"{self.broker_address}  |  Inscrito no tópico de gatilho >>>> {self.gatilho}", "blue"))
+                # Reseta o gatilho enviando 0 para o tópico
+                self.enviar_valor_gatilho(0)
+
+            # Inscreve-se nos tópicos de memória
+            for topico in self.mem_list:
+                self.client.subscribe(topico)
+                log_queue.put((f"{self.broker_address}  |  Inscrito no tópico de memória: {topico}", "blue"))
+        except Exception as e:
+            log_queue.put((f"{self.broker_address}  |  Erro ao inscrever nos tópicos: {e}", "red"))
+
+    def on_message(self, client, userdata, msg):
+        """
+        Callback para processar mensagens recebidas.
+        """
+        try:
+            topic = msg.topic
+            payload = msg.payload.decode('utf-8')  # Converte o payload para string
+
+            # Verifica se a mensagem é do tópico de gatilho
+            if topic == self.gatilho:
+                self.processar_gatilho(payload)
+            elif topic in self.mem_list:
+                self.processar_memoria(topic, payload)
+                
+        except Exception as e:
+            log_queue.put((f"{self.broker_address}  |  Erro ao processar a mensagem: {e}", "red"))
+
+    def processar_memoria(self, topico, valor):
+        """
+        Processa os dados das memórias recebidas.
+        """
+        try:
+            """
+            Função para identificar o tipo do valor e convertê-lo para gravação correta.
+            Retorna:
+                - NULL se vazio
+                - INT se número inteiro
+                - FLOAT se número decimal
+                - STRING se misturado ou texto puro
+            """
+            if isinstance(valor, str):  # Garante que está recebendo uma string
+                valor = valor.strip()  # Remove espaços em branco
+                
+                # 1. Verifica se está vazio
+                if valor == "":
+                    valor = "NULL"
+
+                # 2. Verifica se é Inteiro (números sem ponto ou vírgula)
+                elif valor.isdigit():  
+                    valor = int(valor)  # Converte para inteiro
+
+                # 3. Verifica se é Float (com ponto ou vírgula)
+                else:
+                    try:
+                        valor = float(valor.replace(",", "."))  # Converte para float (aceita ',' ou '.')
+                    except ValueError:
+                        valor = str(valor)  # Se não for nem int nem float, mantém como string
+
+
+            with self.lock:
+                self.memories[topico] = valor  # Atualiza o valor no dicionário de memórias
+                print(f"{self.broker_address}  |  Memória atualizada: {topico} = {valor}")
+        except Exception as e:
+            log_queue.put((f"{self.broker_address}  |  Erro ao processar memória: {e}", "red"))
+
+    def processar_gatilho(self, valor):
+        """
+        Processa o gatilho e inicia gravações se houver uma borda de subida.
+        """
+        try:
+            valor = int(valor)  # Converte o valor do gatilho para inteiro
+            if valor != 0 and self.estado_gatilho_anterior == 0:  # Detecta borda de subida
+                self.inicio_tempo = time.perf_counter() # Inicia o calculo de tempo gasto
+                if status_conexao:
+                    pass
+                    #log_queue.put((f"Iniciando gravação Mqtt Address:{self.broker_address} - Gatilho:{self.gatilho}...", "green"))
+
+                # Lê todas as memórias da lista, mesmo que não tenham sido atualizadas
+                dados_memorias = {}
+                for topico in self.mem_list:
+                    dados_memorias[topico] = self.memories.get(topico, 0)  # Usa 0 como valor padrão
+
+                # Cria o pacote com os dados
+                item = {
+                    "Address": self.broker_address,
+                    "gatilho": self.gatilho,
+                    "dados_memorias": dados_memorias
+                }
+
+                # Verifica se a licença esta ativa antes de iniciar a gravação
+                if licenca_ativa.is_set():
+                    # Coloca o item na fila com as informações de IP, gatilho e dados das memórias
+                    self.fila.put(item)
+                else:
+                    log_queue.put(f"{self.plc_ip}  |  Gravação interrompida licença inativa!")
+
+
+                self.fim_tempo = time.perf_counter()
+                self.tempo_total = self.fim_tempo - self.inicio_tempo
+
+                # Reseta o gatilho enviando 0 para o tópico
+                self.enviar_valor_gatilho(0)
+
+            # Atualiza o estado anterior do gatilho
+            self.estado_gatilho_anterior = valor
+
+        except Exception as e:
+            log_queue.put((f"{self.broker_address}  |  Erro ao processar gatilho: {e}", "red"))
+
+    def enviar_valor_gatilho(self, valor):
+        """
+        Envia o valor para o tópico do gatilho para alterar seu estado.
+        """
+        try:
+            self.client.publish(self.gatilho, valor)
+        except Exception as e:
+            log_queue.put((f"{self.broker_address}  |  Erro ao enviar valor para gatilho: {e}", "red"))
+
+    def ler_memorias(self):
+        """
+        Loop contínuo para monitorar e atualizar os valores das memórias.
+        """
+        while self.running:
+            try:
+                with self.lock:
+                    # Não faz nada aqui, pois as memórias já estão sendo atualizadas em tempo real pelo callback
+                    pass
+
+                # ===> AQUI ELE VERIFICA SE TEM ALGUM TEMPORIZADOR CONFIGURADO
+                if hasattr(self, "triger") and isinstance(self.triger, (int, float)) and self.triger > 0:
+                    if not hasattr(self, "_last_trigger_time"):
+                        self._last_trigger_time = time.perf_counter()  # Usando time.perf_counter() para alta precisão
+
+                    # Verifica se o tempo decorrido atingiu o tempo do trigger
+                    if time.perf_counter() - self._last_trigger_time >= self.triger:
+                        self.inicio_tempo = time.perf_counter() # Inicia o calculo de tempo gasto
+                        self.disparar_fila_triger()  # 🔥🔥 Aqui ele dispara o pacote automático
+                        self._last_trigger_time = time.perf_counter()  # Atualiza o tempo de disparo
+
+            except Exception as e:
+                log_queue.put((f"{self.broker_address}  |  Erro no loop de leitura: {e}", "red"))
+            
+
+    def disparar_fila_triger(self):
+        """
+        Dispara a gravação automática para a fila.
+        """
+        if self.client.is_connected():
+            try:
+                dados_memorias = {}
+                for topico in self.mem_list:
+                    with self.lock:
+                        dados_memorias[topico] = self.memories.get(topico, 0)
+
+                item = {
+                    "Address": self.broker_address,
+                    "gatilho": "TEMPO",
+                    "dados_memorias": dados_memorias
+                }
+
+                # Verifica se a licença esta ativa antes de iniciar a gravação
+                if licenca_ativa.is_set():
+                    # Coloca o item na fila com as informações de IP, gatilho e dados das memórias
+                    self.fila.put(item)
+                else:
+                    log_queue.put(f"{self.plc_ip}  |  Gravação interrompida licença inativa!")
+
+                self.fim_tempo = time.perf_counter()
+                self.tempo_total = self.fim_tempo - self.inicio_tempo
+
+                print(f"{self.broker_address}  |  item na fila:{item}...")
+
+            except Exception as e:
+                log_queue.put((f"{self.broker_address}  |  Erro ao disparar fila automática Address:{self.broker_address} - {e}", "red"))
+
+    def parar(self):
+        """
+        Encerra a conexão MQTT.
+        """
+        self.running = False
+        self.client.loop_stop()
+        self.client.disconnect()
+        log_queue.put((f"{self.broker_address}  |  Conexão MQTT encerrada.", "red"))
+
+
+class InLogicService(win32serviceutil.ServiceFramework):
+    _svc_name_ = "InLogicService"
+    _svc_display_name_ = "InLogic Service"
+    _svc_description_ = "Serviço de comunicação da In Logic - Software"
+
+    def __init__(self, args):
+        win32serviceutil.ServiceFramework.__init__(self, args)
+        self.hWaitStop = win32event.CreateEvent(None, 0, 0, None)
+        self.running = True
+
+    def SvcStop(self):
+        # Informa ao sistema que o serviço está parando
+        self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
+        self.running = False
+        win32event.SetEvent(self.hWaitStop)
+
+    def SvcDoRun(self):
+        try:
+            # Informa ao sistema que o serviço está iniciando
+            self.ReportServiceStatus(win32service.SERVICE_START_PENDING, waitHint=30000)
+
+            servicemanager.LogInfoMsg("InLogicService | Iniciando...")
+
+            # Marca o serviço como "rodando"
+            self.ReportServiceStatus(win32service.SERVICE_RUNNING)
+
+            # Executa a lógica principal do serviço
+            self.executar()
+
+        except Exception as e:
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            erro = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+            servicemanager.LogErrorMsg(f"InLogicService | Erro fatal:\n{erro}")
+            raise
+
+    def executar(self):
+        try:
+            # ⛔️ Evita duplicação no início || Desabilitado
+            #evitar_execucao_duplicada()
+
+            # ✅ Inicia a thread de background uma única vez
+            Thread(target=run_background, name="ThreadLogs", daemon=True).start()
+
+            logger.info("SISTEMA  |  Iniciando InLogic Service...")
+
+            while self.running:
+                time.sleep(5)  # mantém vivo, leve e sem sobrecarga
+
+        except Exception as e:
+            erro = "".join(traceback.format_exception(*sys.exc_info()))
+            servicemanager.LogErrorMsg(f"InLogicService | Erro na execução:\n{erro}")
+            self.SvcStop()
+
+
+
+
+def gravar_dados_excel(caminho_excel, memories, mem_list):
+    if not os.path.exists(caminho_excel):
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.title = "Dados"
+        sheet.append(["Timestamp"] + [f"D{mem}" for mem in mem_list])
+        workbook.save(caminho_excel)
+
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    data_row = [timestamp] + [memories.get(mem, None) for mem in mem_list]
+
+    try:
+        workbook = openpyxl.load_workbook(caminho_excel)
+        sheet = workbook.active
+        sheet.append(data_row)
+        workbook.save(caminho_excel)
+        #log_queue.put(f"Dados gravados no Excel: {caminho_excel}")
+    except Exception as ex:
+        raise
+
+def reprocessar_gravar_dados_excel(caminho_excel, memories, mem_list):
+    if not os.path.exists(caminho_excel):
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.title = "Dados"
+        sheet.append(["Timestamp"] + [f"D{mem}" for mem in mem_list])
+        workbook.save(caminho_excel)
+
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    data_row = [timestamp] + [memories.get(mem, None) for mem in mem_list]
+
+    try:
+        workbook = openpyxl.load_workbook(caminho_excel)
+        sheet = workbook.active
+        sheet.append(data_row)
+        workbook.save(caminho_excel)
+    except Exception as ex:
+        raise
+
+def gravar_dados_sql(memories, tabela_sql, mem_list, db_config=None, clp=None):
+    """
+    Grava dados no SQL com cache de colunas/INSERT, conexão persistente e benchmark.
+    """
+    origem = clp.plc_ip if clp else "SQL"
+    try:
+        timestamp_inicio = time.perf_counter()
+        timestamp = datetime.now()
+        valores = [timestamp] + [memories.get(mem, None) for mem in mem_list]
+
+        if clp and clp.sql_conexao:
+            # ✅ Cache das colunas da tabela
+            if not hasattr(clp, "_colunas_sql"):
+                clp._colunas_sql = clp.sql_conexao.obter_colunas(tabela_sql)
+
+            # ✅ Completa valores com None se faltar
+            valores += [None] * (len(clp._colunas_sql) - len(valores))
+
+            # ✅ Cache do comando INSERT
+            if not hasattr(clp, "_insert_sql_cache"):
+                placeholders = ", ".join(["?"] * len(clp._colunas_sql))
+                clp._insert_sql_cache = f"INSERT INTO {tabela_sql} VALUES ({placeholders})"
+
+            clp.sql_conexao.executar(clp._insert_sql_cache, valores)
+
+        elif db_config:
+            # 🔁 Conexão temporária (fallback)
+            conn_str = (
+                f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+                f"SERVER={db_config['server']};"
+                f"DATABASE={db_config['database']};"
+                f"UID={db_config['username']};"
+                f"PWD={db_config['password']};"
+            )
+            conn = pyodbc.connect(conn_str, timeout=5)
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT * FROM {tabela_sql} WHERE 1=0")
+            colunas = [col[0] for col in cursor.description]
+            valores += [None] * (len(colunas) - len(valores))
+            sql = f"INSERT INTO {tabela_sql} VALUES ({', '.join(['?'] * len(colunas))})"
+            cursor.execute(sql, valores)
+            conn.commit()
+            cursor.close()
+            conn.close()
+        else:
+            log_queue.put(f"{origem}  |  [ERRO] Nenhuma conexão SQL disponível.")
+            return
+
+        # ⏱️ Benchmark
+        tempo_total_ms = (time.perf_counter() - timestamp_inicio) * 1000
+        #log_queue.put(f"{origem}  |  [SQL] Gravação concluída em {tempo_total_ms:.2f} ms")
+
+    except Exception as ex:
+        log_queue.put(f"{origem}  |  [ERRO] Falha ao gravar SQL: {ex}")
+        raise
+
+def reprocessar_gravar_dados_sql(*args, **kwargs):
+    """
+    Reprocessa gravação reaproveitando lógica principal de gravação SQL.
+    """
+    return gravar_dados_sql(*args, **kwargs)
+
+def gravar_dados_mqtt(dados, configuracao_mqtt):
+    """
+    Função para publicar dados via MQTT sem o uso de threads.
+    Executa a conexão, publicação e desconexão diretamente no fluxo principal.
+
+    Parâmetros:
+        dados (dict): Dicionário com os tópicos e valores a serem publicados.
+        configuracao_mqtt (dict): Configuração MQTT contendo:
+            - broker_address (str): Endereço do broker MQTT
+            - porta (int): Porta do broker (padrão: 1883)
+            - client_id (str): Identificação do cliente MQTT (única por conexão)
+            - username (str): Nome de usuário (se necessário)
+            - password (str): Senha (se necessário)
+            - keep_alive (int): Tempo de keep-alive da conexão MQTT (padrão: 60s)
+            - qos (int): Qualidade de Serviço (0, 1 ou 2)
+        log_queue (queue.Queue): Fila para enviar logs para a interface gráfica.
+
+    Lança:
+        Exception: Se houver erro na publicação, será lançado para captura externa.
+    """
+    # Extrair configurações
+    broker = configuracao_mqtt.get('broker_address', '')
+    porta = configuracao_mqtt.get('porta', 1883)
+    client_id = f"{configuracao_mqtt.get('client_id', 'client')}-{uuid.uuid4()}"
+    username = configuracao_mqtt.get('username', '').strip()
+    password = configuracao_mqtt.get('password', '').strip()
+    keep_alive = configuracao_mqtt.get('keep_alive', 60)
+    qos = configuracao_mqtt.get('qos', 1)
+
+    if not broker:
+        raise ValueError("Endereço do broker MQTT não informado.")
+
+    try:
+        # Criar cliente MQTT
+        client = mqtt_client.Client(client_id=client_id, clean_session=True)
+
+        # Configurar autenticação, se necessário
+        if username and password:
+            client.username_pw_set(username, password)
+
+        # Callback para conexão
+        def on_connect(c, u, f, rc):
+            if rc == 0:
+                if status_conexao:
+                    log_queue.put((f"[MQTT {client_id}] ✅ Conectado ao broker {broker}:{porta}", "green"))
+            else:
+                log_queue.put((f"[MQTT {client_id}] ❌ Erro na conexão. Código: {rc}", "red"))
+
+        client.on_connect = on_connect
+
+        # Conectar ao broker
+        if status_conexao:
+            log_queue.put(f"[MQTT {client_id}] 🔄 Conectando ao broker {broker}:{porta}...")
+        client.connect(broker, porta, keep_alive)
+        client.loop_start()
+
+        # Aguardar conexão
+        timeout = 10
+        while not client.is_connected() and timeout > 0:
+            time.sleep(1)
+            timeout -= 1
+
+        if not client.is_connected():
+            raise ConnectionError(f"[MQTT {client_id}] ❌ Falha ao conectar ao broker {broker}:{porta}")
+
+        # Publicar mensagens nos tópicos
+        for topico, valor in dados.items():
+            topico_str = str(topico)
+            valor_str = str(valor)
+            if status_conexao:
+                log_queue.put((f"[MQTT {client_id}] 📢 Publicando -> Tópico: {topico_str} | Valor: {valor_str}", "blue"))
+            resultado = client.publish(topico_str, valor_str, qos=qos)
+
+            # Aguardar confirmação de publicação
+            resultado.wait_for_publish()
+            if resultado.is_published():
+                log_queue.put((f"ATIVO:{broker}|{topico_str} ✅ Dados gravados MQTT com sucesso...", "green"))
+            else:
+                log_queue.put((f"[MQTT {client_id}] ❌ Falha ao publicar no tópico: {topico_str}", "red"))
+
+        # Encerrar conexão
+        client.loop_stop()
+        client.disconnect()
+        if status_conexao:
+            log_queue.put((f"[MQTT {client_id}] 🔌 Desconectado do broker.", "blue"))
+
+    except Exception as e:
+        log_queue.put((f"[MQTT {client_id}] 🔥 ERRO na publicação MQTT: {str(e)}", "red"))
+        raise  # Relança a exceção para tratamento externo
+
+
+def gerenciar_excel_e_sql(clp, diretorio, tabela_sql, db_config):
+    log_queue.put(f"{clp.plc_ip}  |  SISTEMA  | Iniciando sistema avançado de gerenciamento de eventos...")
+    global status_conexao
+
+    LIMITE_FILA_FALHAS = 500
+
+    if not clp.calculos:
+        pass
+
+    # Logs de inicialização
+    if clp.local_gravacao.get("mqtt") is True:
+        log_queue.put(f"{clp.plc_ip}  |  [EVENTOS] Gravação via MQTT ativa")
+    if clp.local_gravacao.get("excel") is True:
+        log_queue.put(f"{clp.plc_ip}  |  [EVENTOS] Gravação via EXCEL ativa")
+    if clp.local_gravacao.get("sql") is True:
+        log_queue.put(f"{clp.plc_ip}  |  [EVENTOS] Gravação via SQL ativa")
+    if clp.local_gravacao.get("notificacao") is True:
+        log_queue.put(f"{clp.plc_ip}  |  [EVENTOS] Envio de Notificação ativa")        
+    if not clp.local_gravacao or all(valor in [None, False] for valor in clp.local_gravacao.values()):
+        log_queue.put((f"{clp.plc_ip}  |  [EVENTOS] - [ERRO] Nenhum evento configurado", "red"))
+
+    while clp.running:
+        data_atual = datetime.now().strftime('%d%m%Y')
+        caminho_excel = os.path.join(diretorio, f"DADOS_P3_{tabela_sql}_{data_atual}.xlsx")
+
+        if not clp.fila.empty():
+            tempo_inicial = time.perf_counter()
+            item = clp.fila.get()
+
+
+            dados = item["dados_memorias"]
+
+            # Funções paralelas com tratamento individual
+            def tarefa_mqtt():
+                try:
+                    gravar_dados_mqtt(dados, clp.configuracao_mqtt)
+                    tempo_final = time.perf_counter() - tempo_inicial
+                    tempo = clp.tempo_total + tempo_final
+                    log_queue.put((f" [EVENTO] | {clp.plc_ip}  |  {clp.gatilho} | PROCESSAMENTO:{clp.tempo_total:.3f}s | MQTT:{tempo_final:.3f}s | T_total:{tempo:.3f}s  - MQTT gravado...", "green"))
+                except Exception as ex:
+                    log_queue.put((f" [EVENTO] | {clp.plc_ip}  | [ERRO] Falha MQTT: {ex}", "red"))
+
+            def tarefa_excel():
+                try:
+                    gravar_dados_excel(caminho_excel, dados, clp.mem_list)
+                    tempo_final = time.perf_counter() - tempo_inicial
+                    tempo = clp.tempo_total + tempo_final
+                    log_queue.put((f" [EVENTO] | {clp.plc_ip}  |  {clp.gatilho} | PROCESSAMENTO:{clp.tempo_total:.3f}s | EXCEL:{tempo_final:.3f}s | T_total:{tempo:.3f}s  - EXCEL gravado...", "green"))
+                except Exception as ex:
+                    log_queue.put((f" [EVENTO] | {clp.plc_ip}  | [ERRO] Falha Excel: {ex}", "red"))
+                    clp.fila_excel.put(dados)
+
+            def tarefa_sql():
+                try:
+                    gravar_dados_sql(dados, tabela_sql, clp.mem_list, db_config)
+                    tempo_final = time.perf_counter() - tempo_inicial
+                    tempo = clp.tempo_total + tempo_final
+                    log_queue.put((f" [EVENTO] | {clp.plc_ip}  |  {clp.gatilho} | PROCESSAMENTO:{clp.tempo_total:.3f}s | SQL:{tempo_final:.3f}s | T_total:{tempo:.3f}s  - SQL gravado...", "green"))
+                except Exception as ex:
+                    log_queue.put((f" [EVENTO] | {clp.plc_ip}  | [ERRO] Falha SQL: {ex}", "red"))
+                    clp.fila_sql.put(dados)
+
+            def tarefa_notificacao():
+                try:
+                    c = clp.notificacao_config
+                    status, resp = enviar_notificacao_fcm(
+                        c["topico"],
+                        c["titulo"],
+                        c["mensagem"]
+                    )
+                    log_queue.put((f" [EVENTO] | {clp.plc_ip}  |  Notificação enviada com seucesso! - Status:{status}", "green"))
+                except Exception as ex:
+                    log_queue.put((f" [EVENTO] | {clp.plc_ip}  | [ERRO] Falha Notificação: {ex}", "red"))
+
+
+            # Execução concorrente
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                futures = []
+                if clp.local_gravacao.get("mqtt"): futures.append(executor.submit(tarefa_mqtt))
+                if clp.local_gravacao.get("excel"): futures.append(executor.submit(tarefa_excel))
+                if clp.local_gravacao.get("sql"): futures.append(executor.submit(tarefa_sql))
+                if clp.local_gravacao.get("notificacao"): futures.append(executor.submit(tarefa_notificacao))
+                for future in as_completed(futures):
+                    future.result()
+
+        # Reprocessa falhas do Excel
+        if not clp.fila_excel.empty():
+            dados_falha_excel = clp.fila_excel.queue[0]
+            try:
+                reprocessar_gravar_dados_excel(caminho_excel, dados_falha_excel, clp.mem_list)
+                log_queue.put((f"{clp.plc_ip}  |  [EVENTOS] - |  Reprocessamento Excel OK", "green"))
+                clp.fila_excel.get()
+                clp.falha_excel = False
+            except Exception as ex:
+                if not clp.falha_excel:
+                    log_queue.put((f"{clp.plc_ip}  |  [EVENTOS] - |  Falha reprocessamento Excel: {ex}", "red"))
+                    clp.falha_excel = True
+
+        # Reprocessa falhas do SQL
+        if not clp.fila_sql.empty():
+            dados_falha_sql = clp.fila_sql.queue[0]
+            try:
+                reprocessar_gravar_dados_sql(dados_falha_sql, tabela_sql, clp.mem_list, db_config)
+                log_queue.put((f"{clp.plc_ip}  |  [EVENTOS] - |  Reprocessamento SQL OK", "green"))
+                clp.fila_sql.get()
+                clp.falha_sql = False
+            except Exception as ex:
+                if not clp.falha_sql:
+                    log_queue.put((f"{clp.plc_ip}  |  [EVENTOS] - |  Falha reprocessamento SQL: {ex}", "red"))
+                    clp.falha_sql = True
+
+        # Limpeza fila de falha SQL
+        if clp.fila_sql.qsize() > LIMITE_FILA_FALHAS:
+            try:
+                clp.fila_sql.get()
+                log_queue.put((f"{clp.plc_ip}  |  [EVENTOS] - |  [Monitoramento] SQL > {LIMITE_FILA_FALHAS}, item removido", "red"))
+                clp.falha_sql = False
+            except Exception as ex:
+                if not clp.falha_sql:
+                    log_queue.put((f"{clp.plc_ip}  |  [EVENTOS] - |  Erro ao limpar fila SQL: {ex}", "red"))
+                    clp.falha_sql = True
+        # Limpeza fila de falha Excel
+        if clp.fila_excel.qsize() > LIMITE_FILA_FALHAS:
+            try:
+                clp.fila_excel.get()
+                log_queue.put((f"{clp.plc_ip}  |  [EVENTOS] - |  [Monitoramento] EXCEL > {LIMITE_FILA_FALHAS}, item removido", "red"))
+                clp.falha_excel = False
+            except Exception as ex:
+                if not clp.falha_excel:
+                    log_queue.put((f"{clp.plc_ip}  |  [EVENTOS] - |  Erro ao limpar fila Excel: {ex}", "red"))
+                    clp.falha_excel = True
+
+
+def enviar_notificacao_fcm(topico, titulo, mensagem):
+    global service_account_info
+    message = {
+        "message": {
+            "topic": topico,
+            "notification": {
+                "title": titulo,
+                "body": mensagem
+            }
+        }
+    }
+
+    with tempfile.NamedTemporaryFile(mode='w+', suffix='.json', delete=False) as tmp_json:
+        json.dump(service_account_info, tmp_json)
+        tmp_json.flush()
+
+        credentials = service_account.Credentials.from_service_account_file(
+            tmp_json.name,
+            scopes=["https://www.googleapis.com/auth/firebase.messaging"]
+        )
+        request = google.auth.transport.requests.Request()
+        credentials.refresh(request)
+        access_token = credentials.token
+
+    os.unlink(tmp_json.name)
+
+    PROJECT_ID = service_account_info["project_id"]
+    url = f"https://fcm.googleapis.com/v1/projects/{PROJECT_ID}/messages:send"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json; UTF-8",
+    }
+    response = requests.post(url, headers=headers, data=json.dumps(message))
+    return response.status_code, response.text
+
+
+def criptografar_json(dados_dict):
+    dados_bytes = json.dumps(dados_dict).encode('utf-8')
+    iv = get_random_bytes(16)
+    cipher = AES.new(CHAVE_SECRETA, AES.MODE_CBC, iv)
+    dados_encriptados = cipher.encrypt(pad(dados_bytes, AES.block_size))
+    return b64encode(iv + dados_encriptados).decode('utf-8')
+
+def descriptografar_json(conteudo_criptografado):
+    dados = b64decode(conteudo_criptografado)
+    iv = dados[:16]
+    dados_encriptados = dados[16:]
+    cipher = AES.new(CHAVE_SECRETA, AES.MODE_CBC, iv)
+    dados_descriptografados = unpad(cipher.decrypt(dados_encriptados), AES.block_size)
+    return json.loads(dados_descriptografados.decode('utf-8'))
+
+def verificar_ou_criar_pasta_imagens():
+    """
+    Verifica se a pasta BASE_IMAGES existe.
+    Caso não exista, ela será criada.
+    """
+    try:
+        if not os.path.exists(BASE_IMAGES):
+            os.makedirs(BASE_IMAGES)
+            log_queue.put(f"  SISTEMA   |  Pasta IMG criada: {BASE_IMAGES}")
+        else:
+            log_queue.put(f"  SISTEMA   |  Pasta IMG já existe: {BASE_IMAGES}")
+    except Exception as e:
+        log_queue.put(f"  SISTEMA   |  [ERRO] Falha ao verificar/criar pasta: {e}")
+
+def verificar_ou_criar_configuracao():
+    """
+    Verifica/cria a pasta e o arquivo conf_inlogic.cfg com dados criptografados.
+    """
+    if not os.path.exists(CONFIG_PATH):
+        os.makedirs(CONFIG_PATH)
+        verificar_ou_criar_pasta_imagens()
+
+    if not os.path.exists(CONFIG_PATH1):
+        estrutura_generica = {
+            "grupos": [
+                {
+                    "grupo": "GRUPO_GENÉRICO_MODIFICAVEL",
+                    "plc_ip": "192.168.2.1",
+                    "tipo_clp": "delta",
+                    "diretorio": "C:\\CAMINHO\\GENERICO\\MODIFICAVEL",
+                    "mem_list": [22031, 22028],
+                    "gatilho": 1,
+                    "intervalo_temporizador": 0,
+                    "tabela_sql": "TABELA_GENÉRICA_MODIFICAVEL",
+                    "db_config": {
+                        "server": "GENÉRICO_MODIFICAVEL",
+                        "database": "GENÉRICO_V001_MODIFICAVEL",
+                        "username": "SEU_NOME_MODIFICAVEL",
+                        "password": "SUA_SENHA"
+                    },
+                    "calculos": {},
+
+                    "notificacao": {
+                        "topico": "teste",
+                        "titulo": "ATENÇÃO",
+                        "mensagem": "Alerta do CLP!"
+                    },
+
+                    "ACESSO_MQTT": {
+                        "broker_address": "mqtt.exemplo.com",
+                        "port": 1883,
+                        "client_id": "cliente1234",
+                        "username": "usuario_teste",
+                        "password": "senha_forte123",
+                        "keep_alive": 60,
+                        "qos": 1
+                    }
+                }
+            ]
+        }
+
+        conteudo_criptografado = criptografar_json(estrutura_generica)
+        with open(CONFIG_PATH1, "w") as f:
+            f.write(conteudo_criptografado)
+
+def carregar_configuracao():
+    """
+    Descriptografa e retorna o conteúdo da configuração .cfg
+    """
+    verificar_ou_criar_configuracao()
+    if os.path.exists(CONFIG_PATH1):
+        try:
+            with open(CONFIG_PATH1, 'r') as f:
+                conteudo = f.read()
+            return descriptografar_json(conteudo)
+        except Exception as e:
+            log_queue.put(f"  SISTEMA   |  [ERRO] Ao descriptografar o config: {e}")
+
+    
+
+    return {"grupos": []}
+
+
+def iniciar_clps():
+    """Inicializa e reinicia CLPs se já existirem."""
+    global clps_ativos
+
+    # 🔁 Finaliza os CLPs ativos anteriores, se houver
+    if clps_ativos:
+        log_queue.put(("SISTEMA  |  ♻️ Finalizando Ativos anteriores...", "yellow"))
+        for clp in clps_ativos:
+            try:
+                clp.parar()  # método parar() precisa existir em cada classe CLP
+            except Exception as e:
+                log_queue.put((f"ERRO  |  Falha ao parar Ativo {getattr(clp, 'plc_ip', 'sem IP')}: {e}", "red"))
+        clps_ativos.clear()
+
+    clps = []
+    config = carregar_configuracao()
+    log_queue.put(("SISTEMA  |  🔄 Iniciando Ativos no sistema...", "blue"))
+
+    clp_count = 0  # Contador para CLPs ativos
+
+    for grupo in config.get("grupos", []):
+        tipo_clp = grupo.get("tipo_clp")
+        log_queue.put((f"SISTEMA  |  Iniciando driver {tipo_clp}...", "blue"))
+
+        if tipo_clp == "delta":
+            clp = CLPModbus(
+                grupo["plc_ip"], 
+                mem_list=grupo["mem_list"], 
+                gatilho=grupo.get("gatilho", 1000), 
+                triger=grupo.get("intervalo_temporizador"),
+                db_config=grupo.get("db_config"),
+                calculos=grupo.get("calculos", {}),
+                mqtt_config_acesso=grupo.get("ACESSO_MQTT", {}),
+                local_gravacao=grupo.get("local_gravacao", {}),
+                notificacao_config=grupo.get("notificacao", {}),
+                manager=manager
+            )
+
+        elif tipo_clp == "controllogix":
+            clp = CLPControlLogix(
+                grupo["plc_ip"], 
+                mem_list=grupo["mem_list"], 
+                gatilho=grupo.get("gatilho", "inlogic"),
+                triger=grupo.get("intervalo_temporizador"), 
+                db_config=grupo.get("db_config"),
+                calculos=grupo.get("calculos", {}),
+                mqtt_config_acesso=grupo.get("ACESSO_MQTT", {}),
+                local_gravacao=grupo.get("local_gravacao", {}),
+                notificacao_config=grupo.get("notificacao", {})
+            )
+
+        elif tipo_clp == "mqtt":
+            clp = CLPMQTT(
+                broker_address=grupo["plc_ip"], 
+                mem_list=grupo["mem_list"], 
+                gatilho=grupo.get("gatilho", "inlogic"),
+                triger=grupo.get("intervalo_temporizador"), 
+                db_config=grupo.get("db_config"),
+                calculos=grupo.get("calculos", {}),
+                mqtt_config_acesso=grupo.get("ACESSO_MQTT", {}),
+                local_gravacao=grupo.get("local_gravacao", {}),
+                notificacao_config=grupo.get("notificacao", {})
+            )
+
+        else:
+            log_queue.put((f"AVISO  |  Tipo de Ativo desconhecido: {tipo_clp}", "orange"))
+            continue
+
+        clps.append(clp)
+        clp_count += 1
+
+        # Threads de operação
+        Thread(target=clp.conectar, name=f"CLP-{clp.plc_ip}-Conectar").start()
+        Thread(target=clp.ler_memorias, name=f"CLP-{clp.plc_ip}-LerMemorias").start()
+        Thread(target=gerenciar_excel_e_sql, args=(clp, grupo["diretorio"], grupo["tabela_sql"], grupo["db_config"])).start()
+
+    log_queue.put((f"SISTEMA  |  ✅ Total de ativos iniciado no sistema >> {clp_count}", "green"))
+    clps_ativos = clps  # Atualiza CLPs ativos
+    return clps
+
+
+def processar_logs():
+    global pipe_handle  # 🔄 Acesso à variável global do pipe
+
+    while True:
+        try:
+            item = log_queue.get(timeout=1)
+
+            if isinstance(item, tuple):
+                mensagem, cor = item
+            else:
+                mensagem = str(item)
+
+            # 📄 Grava no logger rotativo
+            logger.info(mensagem)
+            handler.flush()
+
+            # 🔁 Armazena no buffer circular (últimos logs)
+            log_buffer.append(mensagem)
+
+            # 📤 Envia via pipe, se válido
+            if pipe_handle:
+                try:
+                    win32file.WriteFile(pipe_handle, f"{mensagem}\n".encode("utf-8"))
+                except Exception as e:
+                    logger.warning(f"⚠️ Falha ao enviar log via pipe: {e}")
+                    pipe_handle = None  # 🔌 Reseta o pipe se der erro
+
+        except Empty:
+            continue
+        except Exception as e:
+            logger.error(f"❌ Erro crítico ao processar log: {e}")
+
+
+
+def run_background():
+    try:
+        servicemanager.LogInfoMsg("INLOGIC | Entrando no run_background")
+        Thread(target=processar_logs, name="ThreadLogs", daemon=True).start()
+        threading.Thread(target=inicializar_clps_seguro, daemon=True).start()
+        threading.Thread(target=pipe_server_loop, daemon=True).start()
+        threading.Thread(target=thread_verificacao_licenca, daemon=True).start()
+
+
+    except Exception as e:
+        servicemanager.LogInfoMsg("INLOGIC | Erro na execução em background")
+        logger.exception("Erro na execução em background")
+
+def inicializar_clps_seguro():
+    global clps
+    try:
+        logger.info(" INLOGIC  |  Iniciando driver")
+        clps = iniciar_clps()
+    except Exception as e:
+        servicemanager.LogInfoMsg(" INLOGIC | Erro ao iniciar CLPs")
+        logger.exception(" INLOGIC | Erro ao iniciar CLPs")
+
+def pipe_server_loop():
+    global running
+    import win32pipe, win32file, pywintypes
+    pipe_name = r'\\.\pipe\InlogicPipeCmd'
+
+    while running:
+        handle = None
+        try:
+            # Cria um novo Named Pipe
+            handle = win32pipe.CreateNamedPipe(
+                pipe_name,
+                win32pipe.PIPE_ACCESS_DUPLEX,
+                win32pipe.PIPE_TYPE_MESSAGE | win32pipe.PIPE_READMODE_MESSAGE | win32pipe.PIPE_WAIT,
+                win32pipe.PIPE_UNLIMITED_INSTANCES, 
+                65536, 65536,
+                0, None
+            )
+
+            logger.info("SISTEMA  |  Aguardando conexão do cliente no Named Pipe (Comandos)...")
+
+            # Aguarda a conexão do cliente
+            win32pipe.ConnectNamedPipe(handle, None)
+
+            logger.info("SISTEMA  |  ✅ Cliente conectado ao Named Pipe (Comandos)")
+
+            while running:
+                try:
+                    # Lê o comando do cliente
+                    resp = win32file.ReadFile(handle, 64*1024)
+                    comando = resp[1].decode().strip()
+
+                    # Processa os comandos recebidos
+                    if comando == "iniciar_clps":
+                        log_queue.put(("SISTEMA  |  🔁 Reiniciando CLPs via Named Pipe (Comandos)", "orange"))
+                        threading.Thread(target=inicializar_clps_seguro, daemon=True).start()
+
+                    elif comando == "parar_clps":
+                        log_queue.put(("SISTEMA  |  Parando todos os CLPs...", "orange"))
+                        for clp in clps_ativos:
+                            try:
+                                clp.parar()
+                            except Exception as e:
+                                log_queue.put((f"SISTEMA  |  ERRO ao parar CLP {clp.plc_ip}: {e}", "red"))
+                        clps_ativos.clear()
+
+
+                    elif comando == "status":
+                        status = "\n".join([
+                            f"{clps_ativos.plc_ip} - {'🟢' if clps_ativos.running else '🔴'}"
+                            for clps_ativos in clps
+                        ])
+                        win32file.WriteFile(handle, status.encode("utf-8"))
+
+                    elif comando == "reload_config":
+                        log_queue.put(("CONFIG  | 🔁 Configuração recarregada Testando ...", "blue"))
+
+                    else:
+                        log_queue.put((f"COMANDO  |  🚫 Comando inválido: {comando}", "red"))
+
+                    win32file.WriteFile(handle, f"Comando executado: {comando}".encode())
+
+                except Exception as e:
+                    logger.error(f"❌ Erro ao processar o comando: {e}")
+                    break
+
+        except pywintypes.error as e:
+            logger.error(f"SISTEMA  |  Erro no Named Pipe: {e}")
+        
+        except Exception as e:
+            logger.error(f"SISTEMA  |  Erro inesperado no Named Pipe: {e}")
+
+        finally:
+            try:
+                if handle and handle != win32file.INVALID_HANDLE_VALUE:
+                    win32file.CloseHandle(handle)
+                    logger.info("SISTEMA  |  🧹 Handle do Named Pipe fechado (Comandos)")
+            except Exception as cleanup_exception:
+                logger.error(f"SISTEMA  |  Erro ao fechar o Named Pipe(Comandos): {cleanup_exception}")
+
+            # Se o pipe foi fechado ou ocorreu algum erro, aguarda e tenta criar um novo pipe
+            if running:
+                logger.info("SISTEMA  |  🔄 Tentando reconectar ao cliente (Comandos)... ")
+                time.sleep(1)  # Aguardar antes de tentar uma nova conexão
+
+def obter_serial_maquina():
+    """Obtém informações únicas do sistema."""
+    try:
+        pythoncom.CoInitialize()
+        try:
+            c = wmi.WMI()
+            serial = c.Win32_BaseBoard()[0].SerialNumber.strip()
+            uuid = c.Win32_ComputerSystemProduct()[0].UUID.strip()
+            #print(f"Serial do sistema: {serial}")
+            #print(f"UUID do sistema: {uuid}")
+            return {"serial": serial, "uuid": uuid}
+        finally:
+            pythoncom.CoUninitialize()
+    except Exception as e:
+        print(f"Erro ao obter informações do sistema: {e}")
+        return {"serial": "unknown", "uuid": "unknown"}
+
+def verificar_licenca():
+    try:
+        if not os.path.exists(LICENSE_FILE):
+            print("❌ Arquivo de licença não encontrado.")
+            log_queue.put(f"  SISTEMA   |  [ERRO] Arquivo de licença não encontrado.")
+            licenca_ativa.clear()
+            return False
+
+        with open(LICENSE_FILE, "r") as file:
+            dados_criptografados = file.read()
+
+        dados_licenca = descriptografar_json(dados_criptografados)
+        print(f"🔍 Dados da licença: {dados_licenca}")
+
+        serial_atual = obter_serial_maquina().get("serial", "unknown")
+        serial_arquivo = dados_licenca.get("serial", "")
+        
+        if serial_arquivo == serial_atual:
+            print(f"✅ Licença de hardware compativel!")
+            log_queue.put(f"  SISTEMA   |  Licença de hardware compativel!")
+
+        if serial_arquivo != serial_atual:
+            print(f"⚠️ Serial inválido! Salvo: {serial_arquivo}, Atual: {serial_atual}")
+            log_queue.put(f"  SISTEMA   |  ⚠️ Serial inválido! Salvo: {serial_arquivo}, Atual: {serial_atual}")
+            licenca_ativa.clear()
+            return False
+
+        status = dados_licenca.get("status", "inactive")
+        ultima_verificacao = dados_licenca.get("last_checked", "1970-01-01")
+
+        ultima_verificacao_data = datetime.strptime(ultima_verificacao, "%Y-%m-%d")
+        dias_restantes = (ultima_verificacao_data + timedelta(days=365) - datetime.now()).days
+        print(f"📅 Dias restantes para expiração da licença: {dias_restantes}")
+        log_queue.put(f"  SISTEMA   |  📅 Dias restantes para expiração da licença: {dias_restantes}")
+
+        if status != "active" or datetime.now() > ultima_verificacao_data + timedelta(days=365):
+            dados_licenca["status"] = "inactive"
+            dados_licenca["last_checked"] = datetime.now().strftime("%Y-%m-%d")
+
+            dados_atualizados = criptografar_json(dados_licenca)
+            with open(LICENSE_FILE, "w") as file:
+                file.write(dados_atualizados)
+
+            print("❌ Licença expirada ou inválida. Status atualizado para inactive.")
+            log_queue.put(f"  SISTEMA   |  ❌ Licença expirada ou inválida. Status atualizado para inactive.")
+            licenca_ativa.clear()
+            return False
+
+        print("✅ Licença válida e ativa.")
+        log_queue.put(f"  SISTEMA   |  ✅ Licença válida e ativa!")
+        licenca_ativa.set()
+        return True
+
+    except Exception as e:
+        print(f"🚨 Erro ao verificar licença: {e}")
+        log_queue.put(f"  SISTEMA   |  [ERRO] licença: {e}")
+        licenca_ativa.clear()
+        return False
+
+def thread_verificacao_licenca():
+    intervalo = 30 * 24 * 3600  # Intervalo inicial de 30 dias
+
+    while True:
+        print(f"🔄 Iniciando verificação da licença em {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+        log_queue.put(f"  SISTEMA   |  Iniciando verificação da licença em {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+        ativa = verificar_licenca()
+
+        if ativa:
+            intervalo = 30 * 24 * 3600  # Próxima verificação em 30 dias
+        else:
+            intervalo = 600  # Próxima verificação em 10 minutos
+
+        proxima_verificacao = datetime.now() + timedelta(seconds=intervalo)
+        print(f"⏰ Próxima verificação de licença agendada para {proxima_verificacao.strftime('%d/%m/%Y %H:%M:%S')}")
+        log_queue.put(f"  SISTEMA   |  Próxima verificação de licença agendada para {proxima_verificacao.strftime('%d/%m/%Y %H:%M:%S')}")
+
+        time.sleep(intervalo)
+
+
+
+
+
+
+
+if __name__ == '__main__':
+
+    freeze_support()  # Necessário no Windows para rodar processos
+
+    from multiprocessing import Manager # Import lib forçar identificação empacotamento
+    manager = Manager() # Cria um gerenciador de objetos compartilhados entre principal e processos 
+
+    if True:
+        if len(sys.argv) == 1:
+            # Se nenhum argumento for passado, registra e inicia o serviço
+            servicemanager.Initialize()
+            servicemanager.PrepareToHostSingle(InLogicService)
+            servicemanager.StartServiceCtrlDispatcher()
+        else:
+            # Rodar como serviço
+            win32serviceutil.HandleCommandLine(InLogicService)
+
+    # Rodar local
+    #iniciar_clps()
+
+
+
